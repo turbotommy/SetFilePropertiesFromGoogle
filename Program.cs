@@ -9,7 +9,22 @@ namespace SetFilePropertiesFromGoogle
         static void Main(string[] args)
         {
             Console.WriteLine("Hello World!");
-            string filePath = @"C:empexample.docx";
+            var googlePhoto=new GooglePhoto();
+            
+            googlePhoto.Authenticate("tommy.ekh@google.com", @"C:\LabDev\SetFilePropertiesFromGoogle\credentials.json");
+
+            var photos = googlePhoto.GetPhotos();
+
+            var dirInfo = new DirInfo();
+        
+            dirInfo.PopulateDictionary(@"C:\Temp\Takeout\Google Foto");
+            //dirInfo.PopulateDictionary(@"V:\Tmp\Takeout\Google Foto");
+
+            string filePath = @"C:\Temp\Takeout\Google Foto\2008-04-26\IMAG0095.jpg";
+            string metadatafile= @"C:\Temp\Takeout\Google Foto\2008-04-26\IMAG0095.jpg.json";
+
+
+            var metadata = googlePhoto.GetGooglePhotoJSON(metadatafile);
             var file = ShellFile.FromFilePath(filePath);
 
             // Read and Write:
