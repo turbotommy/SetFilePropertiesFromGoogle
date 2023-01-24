@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "SetFilePropertiesFromGoogle": {
+      "commandName": "Project",
+      "nativeDebugging": false
+    }
+  }
+}

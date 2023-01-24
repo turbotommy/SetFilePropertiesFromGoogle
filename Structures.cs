@@ -35,5 +35,6 @@ namespace SetFilePropertiesFromGoogle
         public double focalLength { get; set; }
         public double apertureFNumber { get; set; }
         public int isoEquivalent { get; set; }
+        public string exposureTime { get; set; }
     }
 }

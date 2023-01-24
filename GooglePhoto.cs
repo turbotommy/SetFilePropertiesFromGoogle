@@ -1,21 +1,23 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-using Google.Apis.Auth.OAuth2;
+﻿using Google.Apis.Auth.OAuth2;
 using Google.Apis.Util.Store;
+using Microsoft.WindowsAPICodePack.Shell.PropertySystem;
 using Newtonsoft.Json;
-
+using System;
+using System.Collections.Generic;
 using System.IO;
-using System.Net;
-using System.Threading;
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace SetFilePropertiesFromGoogle
 {
     class GooglePhoto
     {
+        Dictionary<string, string> pictures = new Dictionary<string, string>();
         UserCredential credential;
-        string baseGooglePhotoURL = "https://photoslibrary.googleapis.com/v1/mediaItems/";
+        Uri baseGooglePhotoURL = new Uri("https://photoslibrary.googleapis.com/v1/mediaItems/");
         HttpClientHandler handler;
         HttpClient httpClient;
 
@@ -24,8 +26,13 @@ namespace SetFilePropertiesFromGoogle
             //Create Http client
             handler = new HttpClientHandler();
             httpClient = new HttpClient(handler);
-            
+            httpClient.DefaultRequestHeaders
+                .Accept
+                .Add(new MediaTypeWithQualityHeaderValue("application/json"));//ACCEPT header
+
+            httpClient.BaseAddress = baseGooglePhotoURL;
         }
+
         public object GetGooglePhotoJSON(string jsonFile)
         {
             
@@ -50,7 +57,7 @@ namespace SetFilePropertiesFromGoogle
             using (var stream = new FileStream(credentialsFile, FileMode.Open, FileAccess.Read))
             {
                 credential = GoogleWebAuthorizationBroker.AuthorizeAsync(
-                    GoogleClientSecrets.Load(stream).Secrets,
+                    GoogleClientSecrets.FromStream(stream).Secrets,
                     scopes,
                     UserName,
                     CancellationToken.None,
@@ -58,43 +65,52 @@ namespace SetFilePropertiesFromGoogle
             }
         }
       
-        public HttpWebResponse HttpCall(string method, string query)
+        public HttpResponseMessage HttpCall(HttpMethod method, string query)
         {
             if (credential.Token.IsExpired(Google.Apis.Util.SystemClock.Default))
             {
                 var refreshResult = credential.RefreshTokenAsync(CancellationToken.None).Result;
             }
+            
+            var authorization = AuthenticationHeaderValue.Parse(credential.Token.TokenType + " " + credential.Token.AccessToken);
+            httpClient.DefaultRequestHeaders.Authorization = authorization;
 
-            HttpWebRequest httpWebRequest = (HttpWebRequest)WebRequest.Create(query);
-            httpWebRequest.ContentType = "application/json";
-            httpWebRequest.Headers.Add("Authorization:" + credential.Token.TokenType + " " + credential.Token.AccessToken);
+            Uri uri = new Uri(query);
+            
+            HttpRequestMessage request = new HttpRequestMessage(method,uri);
+            request.Headers.Add("Authorization", credential.Token.TokenType + " " + credential.Token.AccessToken);
 
-            httpWebRequest.Method = method;
-            if (httpWebRequest.Method == "PATCH")
-            {
-                
-            }
-            HttpWebResponse response = httpWebRequest.GetResponse() as HttpWebResponse;
+            var task = httpClient.GetAsync(uri);
+            task.Wait();
 
+            var response = task.Result;
+            
             return response;
         }
 
         public void SetDescription(string id, string description)
         {
             string query = "https://photoslibrary.googleapis.com/v1/mediaItems/"+id+ "?description";
-            HttpCall("PATCH", query);
+            //HttpCall("PATCH", query);
         }
-        public Dictionary<string, string> GetPhotos()
+
+        /// <summary>
+        ///  Check photos in Google Photos against local photo collection
+        /// </summary>
+        /// <param name="localPhotos"></param>
+        /// <returns>Collection with found local photos</returns>
+        public Dictionary<DateTime, FileInfo> CheckPhotos(DirInfo dirInfo)
         {
-            Dictionary<string, string> pictures = new Dictionary<string, string>();
+            Dictionary<DateTime, FileInfo> foundPics = new Dictionary<DateTime, FileInfo>();
             string nextPage = "-";
             string baseAddress = "https://photoslibrary.googleapis.com/v1/mediaItems?pageSize=100";
             string query = "";
             
             clsResponseRootObject responseObject = new clsResponseRootObject();
-
+            Dictionary<string, List<FileInfo>> dateSortedPics;
             try
             {
+                Task fileMoveTask = null;
                 while (nextPage?.Length > 0)
                 {
                     if (nextPage.Length == 1)
@@ -105,37 +121,100 @@ namespace SetFilePropertiesFromGoogle
                     {
                         query = baseAddress + "&pageToken=" + nextPage;
                     }
-                    var response = HttpCall("GET", query);
-
-                    using (Stream responseStream = response.GetResponseStream())
+                    var response = HttpCall(new HttpMethod("get"), query);
+                    var task = response.Content.ReadAsStringAsync();
+                    if (fileMoveTask != null)
                     {
-                        StreamReader reader = new StreamReader(responseStream, Encoding.UTF8);
-
-                        responseObject = JsonConvert.DeserializeObject<clsResponseRootObject>(reader.ReadToEnd());
-
-                        if (responseObject != null)
+                        fileMoveTask.Wait();
+                        if (fileMoveTask.IsFaulted)
                         {
-                            nextPage = responseObject.nextPageToken;
-                            if (responseObject.mediaItems != null && responseObject.mediaItems.Count > 0)
-                            {
-                                Console.WriteLine("------------------------Retrieving media files--------------------------------");
-                                foreach (var item in responseObject.mediaItems)
-                                {
-                                    response = HttpCall("GET", "https://photoslibrary.googleapis.com/v1/mediaItems/" + item.id);
-                                    using (Stream contentStream = response.GetResponseStream())
-                                    {
-                                        StreamReader contentReader = new StreamReader(contentStream, Encoding.UTF8);
-
-                                        var mediaContent = JsonConvert.DeserializeObject(contentReader.ReadToEnd());
-                                    }
-                                        SetDescription(item.id, "Duplicate");
-                                    if(!pictures.TryAdd(item.filename, item.id)) {
-                                        Console.WriteLine($"{item.filename} already exists!");
-                                    }
-                                    //Console.WriteLine(string.Format("ID:{0}, Filename:{1}, MimeType:{2}, Created:{3}", item.id, item.filename, item.mimeType, item.mediaMetadata.creationTime));
-                                }
-                            }
+                            Console.WriteLine("Error occurred in filemove: " + fileMoveTask.Exception.Message);
                         }
+                    }
+                    task.Wait();
+                    responseObject = JsonConvert.DeserializeObject<clsResponseRootObject>(task.Result);
+                    if (responseObject != null)
+                    {
+                        nextPage = responseObject.nextPageToken;
+                        if (responseObject.mediaItems != null && responseObject.mediaItems.Count > 0)
+                        {
+                            Console.WriteLine("------------------------Retrieving media files--------------------------------");
+                            dateSortedPics = new Dictionary<string, List<FileInfo>>();
+                            var localPhotos = dirInfo.pictures;
+                            foreach (var item in responseObject.mediaItems)
+                            {
+                                //Create file object
+                                FileInfo file = new FileInfo(item);
+                                var googleCreationDate = file.createDate;
+                                
+                                /*
+                                if (item.filename.StartsWith("IMAG00"))
+                                    Console.WriteLine(item.filename);
+                                */
+                                if(localPhotos.TryGetValue(item.filename,out var localPic))
+                                {
+                                    
+                                    localPic.AddGoogleTime(googleCreationDate);
+                                    /*
+                                    ShellPropertyWriter propertyWriter = localPic.GetPropertyWriter();
+                                    propertyWriter.WriteProperty(SystemProperties.System.Author, new string[] { "Author" });
+                                    propertyWriter.Close();
+                                    if (Math.Abs(DateTime.Compare((DateTime)localCreationDate,googleCreationDate))>2)
+                                    {
+                                        Console.WriteLine($"Date, Google:{googleCreationDate} local:{localCreationDate}");
+                                        localPic.System.Photo.DateTaken.Value = (DateTime?)googleCreationDate;
+                                    }
+                                    */
+                                    
+                                    
+                                    
+                                    var month = string.Format("{0:yyyy-MM}", googleCreationDate);
+                                    Console.WriteLine($"Date for {localPic.SourceFile}: {localPic.createDate}, on google:{googleCreationDate}");
+
+                                    //Add to SortedDate
+                                    if (dateSortedPics.TryGetValue(month, out var picList))
+                                    {
+                                        if (picList.Contains(localPic))
+                                        {
+                                            Console.WriteLine($"Weird - {localPic.SourceFile} already in list");
+                                        }
+                                        else
+                                        {
+                                            picList.Add(localPic);
+
+                                        }
+                                        dateSortedPics[month] = picList;
+                                    }
+                                    else
+                                    {
+                                        picList = new List<FileInfo>();
+                                        picList.Add(localPic);
+                                        dateSortedPics.Add(month, picList);
+                                    }
+                                }
+                                /*
+                                response = HttpCall(new HttpMethod("GET"), "https://photoslibrary.googleapis.com/v1/mediaItems/" + item.id);
+
+                                using (Stream contentStream = new MemoryStream())
+                                {
+                                    StreamReader contentReader = new StreamReader(contentStream, Encoding.UTF8);
+
+                                    var mediaContent = JsonConvert.DeserializeObject(contentReader.ReadToEnd());
+                                }
+
+                                SetDescription(item.id, "Duplicate");
+
+                                if (!pictures.TryAdd(item.filename, item.id))
+                                {
+                                    Console.WriteLine($"{item.filename} already exists!");
+                                }
+                                */
+                                //Console.WriteLine(string.Format("ID:{0}, Filename:{1}, MimeType:{2}, Created:{3}", item.id, item.filename, item.mimeType, item.mediaMetadata.creationTime));
+                            }
+                            if(dateSortedPics.Count>0)
+                                fileMoveTask = dirInfo.MoveFiles(dateSortedPics);
+                        }
+                        responseObject = null;
                     }
                 }
             }
@@ -144,9 +223,9 @@ namespace SetFilePropertiesFromGoogle
                 Console.WriteLine("Error occured: " + ex.Message);
             }
 
-
-            return pictures;
+            return foundPics;
         }
+
     }
 }
 
